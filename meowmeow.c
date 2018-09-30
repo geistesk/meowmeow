@@ -22,12 +22,22 @@ struct KeyBinding {
   const union KeyBindingArg arg;
 };
 
+struct WindowList {
+  Window window;
+  struct WindowList *next;
+};
+
+void addWindow(Window);
+void destroyNotifyHandler(XEvent*);
 void keyPressHandler(XEvent*);
 void loop();
 void mapRequestHandler(XEvent*);
 void quit();
+void refocusCurrentWindow();
+void remWindow(Window);
 void setup();
 void spawn(const union KeyBindingArg);
+void tabNextWindow();
 
 #include "config.h"
 
@@ -35,6 +45,7 @@ void spawn(const union KeyBindingArg);
 static void (*evHandler[LASTEvent])(XEvent *ev) = {
   [KeyPress] = keyPressHandler,
   [MapRequest] = mapRequestHandler,
+  [DestroyNotify] = destroyNotifyHandler,
 };
 
 static bool running;
@@ -43,6 +54,7 @@ static int32_t screen;
 static Window root;
 static int32_t disWidth;
 static int32_t disHeight;
+static struct WindowList *curWindow;
 
 // Spawns a new process for a KeyBindingArg (.args)
 void spawn(const union KeyBindingArg arg) {
@@ -65,26 +77,69 @@ void quit() {
   running = false;
 }
 
-// Initial setup based on `config.h`
-void setup() {
-  // Select default screen and read resolution
-  screen = DefaultScreen(dpy);
-  root = RootWindow(dpy, screen);
-
-  disWidth = DisplayWidth(dpy, screen);
-  disHeight = DisplayHeight(dpy, screen);
-
-  // Registers each KeyBinding which will be inspected in loop()
-  for (uint32_t i = 0; i < LENGTH(bindings); i++) {
-    XGrabKey(dpy,
-        XKeysymToKeycode(dpy, bindings[i].keysym), bindings[i].modifier,
-        DefaultRootWindow(dpy), true, GrabModeAsync, GrabModeAsync);
+// Set the focus to the current window
+void refocusCurrentWindow() {
+  if (curWindow == NULL) {
+    return;
   }
 
-  // Register for MapRequest and DestroyNotify
-  XSelectInput(dpy, root, SubstructureNotifyMask | SubstructureRedirectMask);
+  XSetInputFocus(dpy, curWindow->window, RevertToParent, CurrentTime);
+  XRaiseWindow(dpy, curWindow->window);
+}
 
-  running = true;
+// Register a new window (map it)
+void addWindow(Window window) {
+  struct WindowList *tmpWindow = calloc(1, sizeof(struct WindowList));
+  tmpWindow->window = window;
+  tmpWindow->next   = (curWindow == NULL) ? tmpWindow : curWindow;
+
+  // Remap next pointer of our ring buffer
+  if (curWindow != NULL) {
+    // Last entry iff next points to curWindow
+    struct WindowList *wl = curWindow;
+    for (; wl->next != curWindow; wl = wl->next);
+    wl->next = tmpWindow;
+  }
+
+  curWindow = tmpWindow;
+
+  refocusCurrentWindow();
+}
+
+// Unregister a window (unmap)
+void remWindow(Window window) {
+  if (curWindow == curWindow->next) {
+    // There is only one window, must be ours
+    free(curWindow);
+    curWindow = NULL;
+  } else {
+    // Search for entry which succsessor points to our window
+    struct WindowList *wl = curWindow, *del;
+    for (; wl->next->window != window; wl = wl->next);
+    del = wl->next;
+    wl->next  = del->next;
+
+    if (curWindow == del) {
+      curWindow = wl;
+    }
+
+    free(del);
+  }
+
+  refocusCurrentWindow();
+}
+
+// Toggle to the next window
+void tabNextWindow() {
+  if (curWindow == NULL) {
+    // no windows = no work
+    return;
+  }
+
+  // Set pointer to next window.
+  curWindow = curWindow->next;
+
+  refocusCurrentWindow();
 }
 
 // Handles the KeyPress events
@@ -107,6 +162,15 @@ void mapRequestHandler(XEvent *ev) {
 
   XMapWindow(dpy, xmaprequest.window);
   XMoveResizeWindow(dpy, xmaprequest.window, 0, 0, disWidth, disHeight);
+
+  addWindow(xmaprequest.window);
+}
+
+// Handle the DestroyNotify event for unmapping windows
+void destroyNotifyHandler(XEvent *ev) {
+  XDestroyWindowEvent xdestroywindow = ev->xdestroywindow;
+
+  remWindow(xdestroywindow.window);
 }
 
 // The WM's loop where each keystroke or event will be handled
@@ -121,6 +185,33 @@ void loop() {
       evHandler[ev.type](&ev);
     }
   }
+}
+
+// Initial setup based on `config.h`
+void setup() {
+  // Select default screen and read resolution
+  screen = DefaultScreen(dpy);
+  root = RootWindow(dpy, screen);
+
+  disWidth = DisplayWidth(dpy, screen);
+  disHeight = DisplayHeight(dpy, screen);
+
+  // Registers each KeyBinding which will be inspected in loop()
+  for (uint32_t i = 0; i < LENGTH(bindings); i++) {
+    XGrabKey(dpy,
+        XKeysymToKeycode(dpy, bindings[i].keysym), bindings[i].modifier,
+        DefaultRootWindow(dpy), true, GrabModeAsync, GrabModeAsync);
+  }
+
+  // Register for MapRequest and DestroyNotify
+  // This is kind of buggy, time to RTFM; TODO
+	XSelectInput(dpy, root,
+      EnterWindowMask|FocusChangeMask|PropertyChangeMask| \
+      StructureNotifyMask|SubstructureRedirectMask);
+
+  running = true;
+
+  curWindow = NULL;
 }
 
 int main(void) {
