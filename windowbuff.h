@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include <X11/Xlib.h>
@@ -14,6 +15,6 @@ struct WindowBuff {
   struct WindowEle *head;
 };
 
-void addWindow(struct WindowBuff *wb, Window window);
-void remWindow(struct WindowBuff *wb, Window window);
-bool chkWindowExists(struct WindowBuff *wb, Window window);
+void addWindow(struct WindowBuff*, Window);
+void remWindow(struct WindowBuff*, Window);
+bool chkWindowExists(struct WindowBuff*, Window);

@@ -46,14 +46,13 @@ bool chkWindowExists(struct WindowBuff *wb, Window window) {
     return false;
   }
 
-  if (wb->head == wb->head->next) {
-    return wb->head->window == window;
-  }
-
-  for (struct WindowEle *we = wb->head; we->next != wb->head; we = we->next) {
+  struct WindowEle *we = wb->head;
+  do {
     if (we->window == window) {
       return true;
     }
-  }
+
+    we = we->next;
+  } while (we != wb->head);
   return false;
 }
