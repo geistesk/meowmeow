@@ -1,6 +1,6 @@
 CC     ?= gcc
 CFLAGS  = -Wall -Wextra -Wpedantic --std=c11 -Ofast -Os -lX11
-SRC     = meowmeow.c
+SRC     = meowmeow.c windowbuff.c
 OBJ     = $(SRC:.c=.o)
 OUTPUT  = meowmeow
 

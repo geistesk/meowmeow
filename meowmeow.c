@@ -1,14 +1,22 @@
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include <X11/XKBlib.h>
 #include <X11/Xlib.h>
 #include <X11/keysym.h>
 
+#include "windowbuff.h"
+
 // Calculates the length of an array of struct elements
 #define LENGTH(x) (sizeof(x) / sizeof(*x))
+
+// Macro to "use" unused parameters against -Wunused-parameter
+#define UNUSED(x) (void)(x)
 
 union KeyBindingArg {
   const char **args;
@@ -22,20 +30,14 @@ struct KeyBinding {
   const union KeyBindingArg arg;
 };
 
-struct WindowList {
-  Window window;
-  struct WindowList *next;
-};
-
-void addWindow(Window);
 void destroyNotifyHandler(XEvent*);
 void keyPressHandler(XEvent*);
 void loop();
 void mapRequestHandler(XEvent*);
 void quit();
 void refocusCurrentWindow();
-void remWindow(Window);
 void setup();
+void sigchld(int);
 void spawn(const union KeyBindingArg);
 void tabNextWindow();
 
@@ -54,7 +56,18 @@ static int32_t screen;
 static Window root;
 static int32_t disWidth;
 static int32_t disHeight;
-static struct WindowList *curWindow;
+static struct WindowBuff *winBuff;
+
+// Stop immediately and drop an error message
+void die(const char *msg) {
+  printf("meowmeow is kill: %s\n\n", msg);
+  exit(EXIT_FAILURE);
+}
+
+// Quits the WM and perhaps resets some things in the future
+void quit() {
+  running = false;
+}
 
 // Spawns a new process for a KeyBindingArg (.args)
 void spawn(const union KeyBindingArg arg) {
@@ -72,73 +85,25 @@ void spawn(const union KeyBindingArg arg) {
   }
 }
 
-// Quits the WM and perhaps resets some things in the future
-void quit() {
-  running = false;
-}
-
 // Set the focus to the current window
 void refocusCurrentWindow() {
-  if (curWindow == NULL) {
+  if (winBuff->head == NULL) {
     return;
   }
 
-  XSetInputFocus(dpy, curWindow->window, RevertToParent, CurrentTime);
-  XRaiseWindow(dpy, curWindow->window);
-}
-
-// Register a new window (map it)
-void addWindow(Window window) {
-  struct WindowList *tmpWindow = calloc(1, sizeof(struct WindowList));
-  tmpWindow->window = window;
-  tmpWindow->next   = (curWindow == NULL) ? tmpWindow : curWindow;
-
-  // Remap next pointer of our ring buffer
-  if (curWindow != NULL) {
-    // Last entry iff next points to curWindow
-    struct WindowList *wl = curWindow;
-    for (; wl->next != curWindow; wl = wl->next);
-    wl->next = tmpWindow;
-  }
-
-  curWindow = tmpWindow;
-
-  refocusCurrentWindow();
-}
-
-// Unregister a window (unmap)
-void remWindow(Window window) {
-  if (curWindow == curWindow->next) {
-    // There is only one window, must be ours
-    free(curWindow);
-    curWindow = NULL;
-  } else {
-    // Search for entry which succsessor points to our window
-    struct WindowList *wl = curWindow, *del;
-    for (; wl->next->window != window; wl = wl->next);
-    del = wl->next;
-    wl->next  = del->next;
-
-    if (curWindow == del) {
-      curWindow = wl;
-    }
-
-    free(del);
-  }
-
-  refocusCurrentWindow();
+  XRaiseWindow(dpy, winBuff->head->window);
+  XSetInputFocus(dpy, winBuff->head->window, RevertToParent, CurrentTime);
 }
 
 // Toggle to the next window
 void tabNextWindow() {
-  if (curWindow == NULL) {
+  if (winBuff->head == NULL) {
     // no windows = no work
     return;
   }
 
   // Set pointer to next window.
-  curWindow = curWindow->next;
-
+  winBuff->head = winBuff->head->next;
   refocusCurrentWindow();
 }
 
@@ -163,14 +128,20 @@ void mapRequestHandler(XEvent *ev) {
   XMapWindow(dpy, xmaprequest.window);
   XMoveResizeWindow(dpy, xmaprequest.window, 0, 0, disWidth, disHeight);
 
-  addWindow(xmaprequest.window);
+  addWindow(winBuff, xmaprequest.window);
+  refocusCurrentWindow();
 }
 
 // Handle the DestroyNotify event for unmapping windows
 void destroyNotifyHandler(XEvent *ev) {
   XDestroyWindowEvent xdestroywindow = ev->xdestroywindow;
 
-  remWindow(xdestroywindow.window);
+  if (!chkWindowExists(winBuff, xdestroywindow.window)) {
+    return;
+  }
+
+  remWindow(winBuff, xdestroywindow.window);
+  refocusCurrentWindow();
 }
 
 // The WM's loop where each keystroke or event will be handled
@@ -187,6 +158,16 @@ void loop() {
   }
 }
 
+// Stolen from dwm ^^,
+void sigchld(int unused) {
+  UNUSED(unused);
+
+  if (signal(SIGCHLD, sigchld) == SIG_ERR) {
+    die("can't install SIGCHLD handler");
+  }
+  while (0 < waitpid(-1, NULL, WNOHANG));
+}
+
 // Initial setup based on `config.h`
 void setup() {
   // Select default screen and read resolution
@@ -196,22 +177,24 @@ void setup() {
   disWidth = DisplayWidth(dpy, screen);
   disHeight = DisplayHeight(dpy, screen);
 
-  // Registers each KeyBinding which will be inspected in loop()
+  sigchld(0);
+
+  // Register evHandler for:
+  // - KeyPress: XGrabKey function
+  // - MapRequest: SubstructureRedirectMask
+  // - DestroyNotify: (StructureNotifyMask,) SubstructureNotifyMask
+
   for (uint32_t i = 0; i < LENGTH(bindings); i++) {
     XGrabKey(dpy,
         XKeysymToKeycode(dpy, bindings[i].keysym), bindings[i].modifier,
         DefaultRootWindow(dpy), true, GrabModeAsync, GrabModeAsync);
   }
 
-  // Register for MapRequest and DestroyNotify
-  // This is kind of buggy, time to RTFM; TODO
-	XSelectInput(dpy, root,
-      EnterWindowMask|FocusChangeMask|PropertyChangeMask| \
-      StructureNotifyMask|SubstructureRedirectMask);
+  XSelectInput(dpy, root, SubstructureRedirectMask|SubstructureNotifyMask);
 
   running = true;
 
-  curWindow = NULL;
+  winBuff = calloc(1, sizeof(struct WindowBuff));
 }
 
 int main(void) {
