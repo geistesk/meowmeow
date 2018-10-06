@@ -30,13 +30,15 @@ struct KeyBinding {
   const union KeyBindingArg arg;
 };
 
+void closeCurWindow();
 void destroyNotifyHandler(XEvent*);
 void keyPressHandler(XEvent*);
 void loop();
 void mapRequestHandler(XEvent*);
 void quit();
-void refocusCurrentWindow();
+void refocusCurWindow();
 void setup();
+void sendDeleteEvent(Window);
 void sigchld(int);
 void spawn(const union KeyBindingArg);
 void tabNextWindow();
@@ -67,6 +69,15 @@ void die(const char *msg) {
 // Quits the WM and perhaps resets some things in the future
 void quit() {
   running = false;
+
+  while (winBuff->head != NULL) {
+    Window tmpWindow = winBuff->head->window;
+
+    sendDeleteEvent(tmpWindow);
+    remWindow(winBuff, tmpWindow);
+  }
+
+  free(winBuff);
 }
 
 // Spawns a new process for a KeyBindingArg (.args)
@@ -85,8 +96,35 @@ void spawn(const union KeyBindingArg arg) {
   }
 }
 
+// Send a delete event to the given window.
+void sendDeleteEvent(Window window) {
+  XEvent xevent;
+  xevent.type = ClientMessage;
+  xevent.xclient.window = window;
+  xevent.xclient.message_type = XInternAtom(dpy, "WM_PROTOCOLS", true);
+  xevent.xclient.format = 32;
+  xevent.xclient.data.l[0] = XInternAtom(dpy, "WM_DELETE_WINDOW", true);
+  xevent.xclient.data.l[1] = CurrentTime;
+
+  XSendEvent(dpy, window, false, NoEventMask, &xevent);
+}
+
+// Closes current window by asking it to close itself
+void closeCurWindow() {
+  if (winBuff->head == NULL ||
+      !chkWindowExists(winBuff, winBuff->head->window)) {
+    return;
+  }
+
+  Window window = winBuff->head->window;
+
+  sendDeleteEvent(window);
+  remWindow(winBuff, window);
+  refocusCurWindow();
+}
+
 // Set the focus to the current window
-void refocusCurrentWindow() {
+void refocusCurWindow() {
   if (winBuff->head == NULL) {
     return;
   }
@@ -104,7 +142,7 @@ void tabNextWindow() {
 
   // Set pointer to next window.
   winBuff->head = winBuff->head->next;
-  refocusCurrentWindow();
+  refocusCurWindow();
 }
 
 // Handles the KeyPress events
@@ -129,7 +167,7 @@ void mapRequestHandler(XEvent *ev) {
   XMoveResizeWindow(dpy, xmaprequest.window, 0, 0, disWidth, disHeight);
 
   addWindow(winBuff, xmaprequest.window);
-  refocusCurrentWindow();
+  refocusCurWindow();
 }
 
 // Handle the DestroyNotify event for unmapping windows
@@ -141,7 +179,7 @@ void destroyNotifyHandler(XEvent *ev) {
   }
 
   remWindow(winBuff, xdestroywindow.window);
-  refocusCurrentWindow();
+  refocusCurWindow();
 }
 
 // The WM's loop where each keystroke or event will be handled
